@@ -7,6 +7,11 @@ on:
     types: [created]
   workflow_dispatch: # manual trigger for testing builds without a release
 
+# Without this, the default GITHUB_TOKEN is read-only and the release-attach
+# step below fails with "Resource not accessible by integration".
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -76,7 +81,7 @@ jobs:
         run: cd dist && zip -r "VideousDownloadius-mac.zip" "Videous Downloadius.app"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ runner.os == 'macOS' && 'dist/VideousDownloadius-mac.zip' || matrix.artifact }}
