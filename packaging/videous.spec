@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 block_cipher = None
-root = Path(__file__).resolve().parent.parent
+# PyInstaller exec()s this file without setting __file__, so use SPECPATH -
+# the variable it injects into the spec namespace for exactly this purpose.
+root = Path(SPECPATH).resolve().parent
 
 # ponytail: FFmpeg must be dropped at packaging/ffmpeg/<os>/ before building,
 # see packaging/README.md. Bundled via datas so no separate install needed.

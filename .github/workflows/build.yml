@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -30,9 +31,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -45,7 +46,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           mkdir -p packaging/ffmpeg/win
-          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
+          curl -L --fail --retry 3 --max-time 300 ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
           7z e ffmpeg.zip -offmpeg_tmp -r ffmpeg.exe
           mv ffmpeg_tmp/ffmpeg.exe ${{ matrix.ffmpeg_dest }}
 
@@ -53,7 +54,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p packaging/ffmpeg/mac
-          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
+          curl -L --fail --retry 3 --max-time 300 ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
           unzip ffmpeg.zip -d ffmpeg_tmp
           mv ffmpeg_tmp/ffmpeg ${{ matrix.ffmpeg_dest }}
           chmod +x ${{ matrix.ffmpeg_dest }}
@@ -62,7 +63,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p packaging/ffmpeg/linux
-          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.tar.xz
+          curl -L --fail --retry 3 --max-time 300 ${{ matrix.ffmpeg_url }} -o ffmpeg.tar.xz
           tar xf ffmpeg.tar.xz
           mv ffmpeg-*-amd64-static/ffmpeg ${{ matrix.ffmpeg_dest }}
           chmod +x ${{ matrix.ffmpeg_dest }}
