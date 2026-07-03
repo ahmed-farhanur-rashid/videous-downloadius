@@ -13,13 +13,18 @@ root = Path(SPECPATH).resolve().parent
 # see packaging/README.md. Bundled via datas so no separate install needed.
 if sys.platform == "win32":
     ffmpeg_bin = [(str(root / "packaging/ffmpeg/win/ffmpeg.exe"), ".")]
-    icon = str(root / "assets/icon.ico")
+    icon_path = root / "assets/icon.ico"
 elif sys.platform == "darwin":
     ffmpeg_bin = [(str(root / "packaging/ffmpeg/mac/ffmpeg"), ".")]
-    icon = str(root / "assets/icon.icns")
+    icon_path = root / "assets/icon.icns"
 else:
     ffmpeg_bin = [(str(root / "packaging/ffmpeg/linux/ffmpeg"), ".")]
-    icon = None  # linux binaries don't embed an icon this way
+    icon_path = None  # linux binaries don't embed an icon this way
+
+# PyInstaller hard-fails if icon points at a file that doesn't exist, so only
+# pass it through when it's actually there. Drop real icons in assets/ later
+# (see packaging/README.md) and this picks them up automatically.
+icon = str(icon_path) if icon_path and icon_path.is_file() else None
 
 a = Analysis(
     [str(root / "src/app.py")],
