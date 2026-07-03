@@ -1,0 +1,85 @@
+name: Build & Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:  # manual trigger for testing builds without a release
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            ffmpeg_url: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+            ffmpeg_dest: packaging/ffmpeg/win/ffmpeg.exe
+            artifact: dist/VideousDownloadius.exe
+            asset_name: VideousDownloadius-windows.exe
+          - os: macos-latest
+            ffmpeg_url: https://evermeet.cx/ffmpeg/getrelease/zip
+            ffmpeg_dest: packaging/ffmpeg/mac/ffmpeg
+            artifact: dist/Videous Downloadius.app
+            asset_name: VideousDownloadius-mac.zip
+          - os: ubuntu-latest
+            ffmpeg_url: https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            ffmpeg_dest: packaging/ffmpeg/linux/ffmpeg
+            artifact: dist/VideousDownloadius
+            asset_name: VideousDownloadius-linux
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      # ponytail: each OS fetches ffmpeg fresh at build time instead of
+      # committing binaries to the repo. Swap the URLs above if a mirror dies.
+      - name: Fetch FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p packaging/ffmpeg/win
+          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
+          7z e ffmpeg.zip -offmpeg_tmp -r ffmpeg.exe
+          mv ffmpeg_tmp/ffmpeg.exe ${{ matrix.ffmpeg_dest }}
+
+      - name: Fetch FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p packaging/ffmpeg/mac
+          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.zip
+          unzip ffmpeg.zip -d ffmpeg_tmp
+          mv ffmpeg_tmp/ffmpeg ${{ matrix.ffmpeg_dest }}
+          chmod +x ${{ matrix.ffmpeg_dest }}
+
+      - name: Fetch FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p packaging/ffmpeg/linux
+          curl -L ${{ matrix.ffmpeg_url }} -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          mv ffmpeg-*-amd64-static/ffmpeg ${{ matrix.ffmpeg_dest }}
+          chmod +x ${{ matrix.ffmpeg_dest }}
+
+      - name: Build
+        run: pyinstaller packaging/videous.spec --distpath dist --workpath build
+
+      - name: Zip macOS app
+        if: runner.os == 'macOS'
+        run: cd dist && zip -r "VideousDownloadius-mac.zip" "Videous Downloadius.app"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ runner.os == 'macOS' && 'dist/VideousDownloadius-mac.zip' || matrix.artifact }}
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.os == 'macOS' && 'dist/VideousDownloadius-mac.zip' || matrix.artifact }}

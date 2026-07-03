@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec.bak
+packaging/ffmpeg/
+.DS_Store
+*.egg-info/
+.venv/
+.venv
+venv/
