@@ -20,15 +20,30 @@ from pipeline_widget import PipelineStrip
 
 DEFAULT_DOWNLOAD_DIR = str(Path.home() / "Downloads")
 
-QUALITY_FORMATS = {
+VIDEO_QUALITIES = {
     "Best": "bestvideo+bestaudio/best",
     "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
     "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
     "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
-    "Audio only (best)": "bestaudio/best",
 }
 
+# kbps=None means "don't force a bitrate" - grab the best source audio
+# stream as-is (faster, lossless if source already matches). A specific
+# kbps forces an ffmpeg transcode to that target via postprocessor.
+AUDIO_QUALITIES = {
+    "Best (source)": None,
+    "320 kbps": 320,
+    "192 kbps": 192,
+    "128 kbps": 128,
+}
+
+MODES = ["Video", "Audio only"]
 THEMES = ["dark", "light", "system"]
+
+# Concurrent fragment downloads only speed up HLS/DASH (fragmented) streams;
+# progressive downloads stay single-stream regardless. Capped at 8 - higher
+# risks throttling/blocks from a single IP.
+CONCURRENCY_OPTIONS = [1, 2, 4, 8]
 
 
 class Signals(QObject):
@@ -40,7 +55,7 @@ class DownloaderWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Universal Video Downloader")
-        self.resize(560, 260)
+        self.resize(600, 420)
         self.download_dir = DEFAULT_DOWNLOAD_DIR
         self.settings = QSettings("videous", "downloadius")
         self.theme_name = self.settings.value("theme", "system")
@@ -80,12 +95,29 @@ class DownloaderWindow(QWidget):
         self.url_input.setPlaceholderText("Paste a video URL...")
         layout.addWidget(self.url_input)
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(10)
+        self.mode_box = QComboBox()
+        self.mode_box.addItems(MODES)
+        self.mode_box.currentTextChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(self.mode_box, 1)
+
+        self.quality_box = QComboBox()
+        mode_row.addWidget(self.quality_box, 1)
+
+        self.concurrency_box = QComboBox()
+        self.concurrency_box.addItems([f"{n}x" for n in CONCURRENCY_OPTIONS])
+        self.concurrency_box.setCurrentIndex(1)  # default 2x - a safe speed bump
+        self.concurrency_box.setToolTip(
+            "Concurrent fragment downloads. Only helps on HLS/DASH streams.\n"
+            "Higher values risk throttling from the source site."
+        )
+        mode_row.addWidget(self.concurrency_box, 1)
+        layout.addLayout(mode_row)
+        self._on_mode_changed(MODES[0])
+
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.quality_box = QComboBox()
-        self.quality_box.addItems(QUALITY_FORMATS.keys())
-        row.addWidget(self.quality_box, 1)
-
         self.dir_label = QLabel(self._short_dir())
         self.dir_label.setObjectName("dirlabel")
         dir_btn = QPushButton("Folder...")
@@ -108,6 +140,13 @@ class DownloaderWindow(QWidget):
         self.status_label = QLabel("Ready.")
         self.status_label.setObjectName("status")
         layout.addWidget(self.status_label)
+
+    def _on_mode_changed(self, mode):
+        self.quality_box.clear()
+        if mode == "Audio only":
+            self.quality_box.addItems(AUDIO_QUALITIES.keys())
+        else:
+            self.quality_box.addItems(VIDEO_QUALITIES.keys())
 
     def _short_dir(self):
         d = self.download_dir
@@ -142,26 +181,48 @@ class DownloaderWindow(QWidget):
         self.status_label.setProperty("error", False)
         self.status_label.setText("Starting...")
         self.pipeline.set_state(0, 0.0)
-        fmt = QUALITY_FORMATS[self.quality_box.currentText()]
-        threading.Thread(target=self._run_download, args=(url, fmt), daemon=True).start()
 
-    def _run_download(self, url, fmt):
+        is_audio = self.mode_box.currentText() == "Audio only"
+        quality_choice = self.quality_box.currentText()
+        concurrency = CONCURRENCY_OPTIONS[self.concurrency_box.currentIndex()]
+        threading.Thread(
+            target=self._run_download,
+            args=(url, is_audio, quality_choice, concurrency),
+            daemon=True,
+        ).start()
+
+    def _run_download(self, url, is_audio, quality_choice, concurrency):
         def hook(d):
             if d["status"] == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate")
                 pct = (d["downloaded_bytes"] / total) if total else 0.0
                 self.signals.stage.emit(0, pct)  # stage 0 = FETCH
             elif d["status"] == "finished":
-                self.signals.stage.emit(1, 0.5)  # stage 1 = CONVERT (merge)
+                self.signals.stage.emit(1, 0.5)  # stage 1 = CONVERT (merge/transcode)
 
         ydl_opts = {
-            "format": fmt,
             "outtmpl": str(Path(self.download_dir) / "%(title)s.%(ext)s"),
-            "merge_output_format": "mp4",
             "progress_hooks": [hook],
             "quiet": True,
             "no_warnings": True,
+            # Resume partial downloads/fragments on retry instead of
+            # restarting from scratch (yt-dlp's own default, set explicitly
+            # so it can't silently change on us).
+            "continuedl": True,
+            "concurrent_fragment_downloads": concurrency,
         }
+
+        if is_audio:
+            kbps = AUDIO_QUALITIES[quality_choice]
+            ydl_opts["format"] = "bestaudio/best"
+            postprocessor = {"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}
+            if kbps is not None:
+                postprocessor["preferredquality"] = str(kbps)
+            ydl_opts["postprocessors"] = [postprocessor]
+        else:
+            ydl_opts["format"] = VIDEO_QUALITIES[quality_choice]
+            ydl_opts["merge_output_format"] = "mp4"
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
