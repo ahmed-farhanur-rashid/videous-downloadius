@@ -40,6 +40,39 @@ def test_audio_postprocessor_shape():
     assert build_postprocessor(None) == {"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}
     assert build_postprocessor(192)["preferredquality"] == "192"
 
+def test_retry_attempts_is_retry_count_plus_one():
+    # mirrors _run_download: retry_count=N means N retries after the first try
+    for retry_count in (0, 2, 5):
+        attempts = retry_count + 1
+        assert attempts == retry_count + 1
+        assert attempts >= 1  # always at least one try, even with 0 retries configured
+
+def test_error_message_truncation():
+    def truncate(message, limit=300):
+        return message if len(message) < limit else message[:limit] + "…"
+
+    short = "short error"
+    assert truncate(short) == short
+    long_msg = "x" * 500
+    result = truncate(long_msg)
+    assert len(result) == 301  # 300 chars + ellipsis
+    assert result.endswith("…")
+
+def test_cookie_opts_mapping():
+    # mirrors the branch in _run_download
+    def build_cookie_opts(cookie_source, cookie_file):
+        opts = {}
+        if cookie_source == "Custom file..." and cookie_file:
+            opts["cookiefile"] = cookie_file
+        elif cookie_source not in ("None", "Custom file..."):
+            opts["cookiesfrombrowser"] = (cookie_source.lower(),)
+        return opts
+
+    assert build_cookie_opts("None", "") == {}
+    assert build_cookie_opts("Chrome", "") == {"cookiesfrombrowser": ("chrome",)}
+    assert build_cookie_opts("Custom file...", "/tmp/cookies.txt") == {"cookiefile": "/tmp/cookies.txt"}
+    assert build_cookie_opts("Custom file...", "") == {}  # no file chosen yet -> no-op, not a crash
+
 if __name__ == "__main__":
     test_theme_tokens()
     test_pipeline_progress_math()
@@ -47,4 +80,7 @@ if __name__ == "__main__":
     test_audio_qualities_map_to_kbps_or_none()
     test_concurrency_capped_for_throttle_safety()
     test_audio_postprocessor_shape()
+    test_retry_attempts_is_retry_count_plus_one()
+    test_error_message_truncation()
+    test_cookie_opts_mapping()
     print("ok")

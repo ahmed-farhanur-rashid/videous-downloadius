@@ -6,6 +6,7 @@ any of that with pytube/selenium/praw/moviepy/bs4.
 """
 import sys
 import threading
+import time
 from pathlib import Path
 
 import yt_dlp
@@ -13,6 +14,7 @@ from PySide6.QtCore import Signal, QObject, QSettings
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QComboBox, QLabel, QFileDialog, QMessageBox,
+    QDialog, QListWidget, QSpinBox, QFormLayout, QDialogButtonBox,
 )
 
 from theme import build_qss, tokens_for
@@ -40,6 +42,10 @@ AUDIO_QUALITIES = {
 MODES = ["Video", "Audio only"]
 THEMES = ["dark", "light", "system"]
 
+# yt-dlp's own browser-cookie readers - covers the login-wall sites (e.g.
+# Instagram) without us touching a cookie store ourselves. "None" is default.
+COOKIE_SOURCES = ["None", "Chrome", "Firefox", "Edge", "Brave", "Safari", "Custom file..."]
+
 # Concurrent fragment downloads only speed up HLS/DASH (fragmented) streams;
 # progressive downloads stay single-stream regardless. Capped at 8 - higher
 # risks throttling/blocks from a single IP.
@@ -56,8 +62,13 @@ class DownloaderWindow(QWidget):
         super().__init__()
         self.setWindowTitle("Universal Video Downloader")
         self.resize(600, 420)
-        self.download_dir = DEFAULT_DOWNLOAD_DIR
+        self.setMinimumSize(600, 420)
+        self.setMaximumWidth(900)  # ponytail: fixed cap stops QMessageBox long text from stretching the window
         self.settings = QSettings("videous", "downloadius")
+        self.download_dir = self.settings.value("download_dir", DEFAULT_DOWNLOAD_DIR)
+        self.retry_count = int(self.settings.value("retry_count", 2))
+        self.cookie_source = self.settings.value("cookie_source", "None")
+        self.cookie_file = self.settings.value("cookie_file", "")
         self.theme_name = self.settings.value("theme", "system")
 
         self.signals = Signals()
@@ -84,6 +95,16 @@ class DownloaderWindow(QWidget):
         title_col.addWidget(title)
         header_row.addLayout(title_col)
         header_row.addStretch()
+        history_btn = QPushButton("History")
+        history_btn.setObjectName("ghost")
+        history_btn.setFixedHeight(30)
+        history_btn.clicked.connect(self._show_history)
+        header_row.addWidget(history_btn)
+        settings_btn = QPushButton("Settings")
+        settings_btn.setObjectName("ghost")
+        settings_btn.setFixedHeight(30)
+        settings_btn.clicked.connect(self._show_settings)
+        header_row.addWidget(settings_btn)
         self.theme_btn = QPushButton(self._theme_label())
         self.theme_btn.setObjectName("ghost")
         self.theme_btn.setFixedHeight(30)
@@ -170,7 +191,77 @@ class DownloaderWindow(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Choose download folder", self.download_dir)
         if d:
             self.download_dir = d
+            self.settings.setValue("download_dir", d)
             self.dir_label.setText(self._short_dir())
+
+    def _show_settings(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Settings")
+        form = QFormLayout(dlg)
+
+        retry_spin = QSpinBox()
+        retry_spin.setRange(0, 10)
+        retry_spin.setValue(self.retry_count)
+        form.addRow("Auto-retry attempts:", retry_spin)
+
+        cookie_box = QComboBox()
+        cookie_box.addItems(COOKIE_SOURCES)
+        cookie_box.setCurrentText(self.cookie_source)
+        form.addRow("Cookies (for login-walled sites):", cookie_box)
+
+        file_row = QHBoxLayout()
+        file_label = QLabel(Path(self.cookie_file).name if self.cookie_file else "(none chosen)")
+        file_btn = QPushButton("Choose file...")
+
+        def pick_cookie_file():
+            f, _ = QFileDialog.getOpenFileName(dlg, "Choose cookies.txt", "", "Text files (*.txt)")
+            if f:
+                file_label.setText(Path(f).name)
+                file_btn.setProperty("chosen_path", f)
+
+        file_btn.clicked.connect(pick_cookie_file)
+        file_btn.setProperty("chosen_path", self.cookie_file)
+        file_row.addWidget(file_label, 1)
+        file_row.addWidget(file_btn)
+        form.addRow("Cookie file:", file_row)
+
+        clear_btn = QPushButton("Clear cookies")
+        clear_btn.clicked.connect(lambda: cookie_box.setCurrentText("None"))
+        form.addRow(clear_btn)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec() == QDialog.Accepted:
+            self.retry_count = retry_spin.value()
+            self.settings.setValue("retry_count", self.retry_count)
+            self.cookie_source = cookie_box.currentText()
+            self.settings.setValue("cookie_source", self.cookie_source)
+            if self.cookie_source == "Custom file...":
+                self.cookie_file = file_btn.property("chosen_path") or ""
+                self.settings.setValue("cookie_file", self.cookie_file)
+
+    def _show_history(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Download history")
+        dlg.resize(500, 300)
+        layout = QVBoxLayout(dlg)
+        list_widget = QListWidget()
+        list_widget.addItems(reversed(self.settings.value("history", [])))
+        layout.addWidget(list_widget)
+        clear_btn = QPushButton("Clear history")
+        clear_btn.clicked.connect(lambda: (self.settings.remove("history"), list_widget.clear()))
+        layout.addWidget(clear_btn)
+        dlg.exec()
+
+    def _add_to_history(self, url, success):
+        history = self.settings.value("history", [])
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        status = "OK" if success else "FAILED"
+        history.append(f"[{stamp}] {status}  {url}")
+        self.settings.setValue("history", history[-200:])  # ponytail: flat list cap, add DB if history needs search/filter later
 
     def _start_download(self):
         url = self.url_input.text().strip()
@@ -201,7 +292,12 @@ class DownloaderWindow(QWidget):
                 self.signals.stage.emit(1, 0.5)  # stage 1 = CONVERT (merge/transcode)
 
         ydl_opts = {
+            # restrictfilenames strips characters like '|' ':' '?' from titles
+            # (image 1's crash: a title with '|' produced an invalid Windows
+            # path). Playlists already work via yt-dlp's own
+            # %(playlist_index)s numbering, no template change needed there.
             "outtmpl": str(Path(self.download_dir) / "%(title)s.%(ext)s"),
+            "restrictfilenames": True,
             "progress_hooks": [hook],
             "quiet": True,
             "no_warnings": True,
@@ -211,6 +307,11 @@ class DownloaderWindow(QWidget):
             "continuedl": True,
             "concurrent_fragment_downloads": concurrency,
         }
+
+        if self.cookie_source == "Custom file..." and self.cookie_file:
+            ydl_opts["cookiefile"] = self.cookie_file
+        elif self.cookie_source not in ("None", "Custom file..."):
+            ydl_opts["cookiesfrombrowser"] = (self.cookie_source.lower(),)
 
         if is_audio:
             kbps = AUDIO_QUALITIES[quality_choice]
@@ -223,13 +324,24 @@ class DownloaderWindow(QWidget):
             ydl_opts["format"] = VIDEO_QUALITIES[quality_choice]
             ydl_opts["merge_output_format"] = "mp4"
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            self.signals.stage.emit(3, 1.0)  # 3 = fully done (past SAVE)
-            self.signals.finished.emit(True, "Download complete.")
-        except Exception as e:
-            self.signals.finished.emit(False, str(e))
+        attempts = self.retry_count + 1
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                self.signals.stage.emit(3, 1.0)  # 3 = fully done (past SAVE)
+                self.signals.finished.emit(True, "Download complete.")
+                self._add_to_history(url, True)
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < attempts - 1:
+                    self.signals.stage.emit(0, 0.0)
+                    time.sleep(2 ** attempt)  # ponytail: basic backoff, no jitter/cap needed at <=10 retries
+
+        self.signals.finished.emit(False, str(last_error))
+        self._add_to_history(url, False)
 
     def _on_stage(self, stage, progress):
         self.pipeline.set_state(stage, progress)
@@ -244,7 +356,12 @@ class DownloaderWindow(QWidget):
         self.status_label.style().polish(self.status_label)
         if not success:
             self.pipeline.set_state(self.pipeline.active_stage, self.pipeline.stage_progress, errored=True)
-            QMessageBox.critical(self, "Download failed", message)
+            # yt-dlp errors can be paragraphs long (see Instagram cookie
+            # error) - a QMessageBox sizes to its text and drags the whole
+            # window with it. Truncate the dialog copy; full text stays in
+            # status_label/history for anyone who needs it.
+            short = message if len(message) < 300 else message[:300] + "…"
+            QMessageBox.critical(self, "Download failed", short)
 
 
 def main():
